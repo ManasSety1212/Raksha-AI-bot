@@ -22,13 +22,30 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'raksha_secret_key'
 CORS(app)
 
+# --- FIREBASE INITIALIZATION ---
 if not firebase_admin._apps:
     key_path = 'serviceAccountKey.json'
+    env_key = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+    
     if os.path.exists(key_path):
         cred = credentials.Certificate(key_path)
         firebase_admin.initialize_app(cred, {
             'storageBucket': 'tanprix-52683.firebasestorage.app'
         })
+        print("[Firebase] Initialized from file")
+    elif env_key:
+        import json
+        cred_dict = json.loads(env_key)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': 'tanprix-52683.firebasestorage.app'
+        })
+        print("[Firebase] Initialized from environment")
+    else:
+        firebase_admin.initialize_app(options={
+            'storageBucket': 'tanprix-52683.firebasestorage.app'
+        })
+        print("[Firebase] Initialized with defaults")
 
 db = firestore.client()
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
