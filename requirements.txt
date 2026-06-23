@@ -1,0 +1,10 @@
+flask
+flask-cors
+flask-socketio
+requests
+eventlet
+openai
+firebase-admin
+reportlab
+python-dateutil
+gunicorn
