@@ -56,82 +56,107 @@ def get_db():
         print("[Firebase] CRITICAL: Firestore client access failed. Check credentials!")
         return None
 
-@app.route('/')
+# --- GLOBAL ERROR HANDLER (Strictly JSON) ---
+@app.errorhandler(Exception)
+def handle_exception(e):
+    app.logger.exception("Global Unhandled Exception")
+    return jsonify({
+        "success": False,
+        "reply": "System is undergoing a brief update. Please try again in 30 seconds.",
+        "error": str(e)
+    }), 500
+
+@app.route("/")
 def home():
     return jsonify({
-        "status": "online",
-        "system": "Raksha AI Bot",
-        "version": "1.0.0",
-        "message": "Raksha AI Backend is successfully running on Render."
+        "status": "ok",
+        "message": "Raksha AI Bot backend running",
+        "version": "1.1.0"
     })
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+@app.route("/api/ai/test")
+def test_ai_route():
+    return jsonify({
+        "status": "ok",
+        "route": "/api/ai/chat is currently active"
+    })
 
-# Initialize Bot Services
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-bot_engine = RakshaBotEngine(OPENAI_KEY) if OPENAI_KEY else None
-bot_fb = RakshaFirebaseService()
-pdf_gen = StudyPlanPDFGenerator()
-
-# --- GEO-FENCING HELPER ---
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000 # meters
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-def check_geofences(device_id, lat, lon, user_id):
-    db = get_db()
-    if not db: return
-    
-    zones = db.collection('safe_zones').where('deviceId', '==', device_id).get()
-    for zone_doc in zones:
-        zone = zone_doc.to_dict()
-        distance = haversine(lat, lon, zone['latitude'], zone['longitude'])
-        if distance > zone['radius']:
-            db.collection('tracking_alerts').add({
-                'deviceId': device_id,
-                'ownerUserId': user_id,
-                'alertType': 'geofence_exit',
-                'message': f"Alert: Device {device_id} entered an unsafe zone.",
-                'latitude': lat, 'longitude': lon,
-                'createdAt': firestore.SERVER_TIMESTAMP,
-                'isRead': False
-            })
-
-# --- GUARDIAN ROUTES ---
-
-@app.route('/api/location/update', methods=['POST'])
-def update_location():
-    db = get_db()
-    if not db: return jsonify({"error": "Database not available"}), 503
-    
-    data = request.json
-    device_id, lat, lon = data.get('deviceId'), data.get('latitude'), data.get('longitude')
-    if not device_id or lat is None: return jsonify({"error": "Invalid data"}), 400
-    
-    # Update firestore
-    db.collection('live_locations').document(device_id).set({**data, 'timestamp': firestore.SERVER_TIMESTAMP}, merge=True)
-    
-    # Geofence check
-    owner = db.collection('guardian_devices').document(device_id).get()
-    if owner.exists:
-        check_geofences(device_id, lat, lon, owner.to_dict().get('ownerUserId'))
-        
-    socketio.emit(f"location_update:{device_id}", data)
-    return jsonify({"status": "ok"})
-
-# --- SOS & AI COMPATIBILITY ROUTES ---
+# --- HARDENED AI CHAT ROUTE ---
 
 @app.route('/api/ai/chat', methods=['POST'])
-def compatibility_chat():
-    data = request.json
-    reply = bot_engine.get_chat_response(data.get('query'), data.get('mode', 'safety').lower())
-    if data.get('userId'):
-        bot_fb.save_chat_message(data.get('userId'), {"sender": "bot", "message": reply, "section": data.get('mode')})
-    return jsonify({"reply": reply, "message": reply})
+def ai_chat():
+    try:
+        # Use silent=True to handle cases where request is not JSON gracefully
+        data = request.get_json(silent=True) or {}
+        
+        user_message = data.get("message", "").strip() or data.get("query", "").strip()
+        section = data.get("section", "safety").lower()
+        user_id = data.get("userId", "guest")
+
+        if not user_message:
+            return jsonify({
+                "success": False,
+                "error": "Message is required"
+            }), 400
+
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return jsonify({
+                "success": False,
+                "error": "OPENAI_API_KEY is not configured on the cloud server."
+            }), 500
+
+        # Attempt AI response via Engine if loaded, otherwise fallback to direct OpenAI
+        reply = "I'm having trouble thinking right now. Please check my engine."
+        
+        if bot_engine:
+            try:
+                reply = bot_engine.get_chat_response(user_message, section)
+            except Exception as e:
+                print(f"Bot Engine Error: {e}")
+                # Fallback to direct client if engine fails
+                from openai import OpenAI
+                client = OpenAI(api_key=api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": f"You are Raksha AI. Help the user in the {section} category. Be practical and safe."},
+                        {"role": "user", "content": user_message}
+                    ]
+                )
+                reply = response.choices[0].message.content
+        else:
+            # Direct OpenAI Fallback
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are Raksha AI Safety Bot. Answer practical and India-focused safety tips."},
+                    {"role": "user", "content": user_message}
+                ]
+            )
+            reply = response.choices[0].message.content
+
+        # Save to Firebase if possible
+        if bot_fb and user_id != "guest":
+            try:
+                bot_fb.save_chat_message(user_id, {"sender": "bot", "message": reply, "section": section})
+            except: pass
+
+        return jsonify({
+            "success": True,
+            "reply": reply,
+            "message": reply
+        })
+
+    except Exception as e:
+        app.logger.exception("AI Chat Logic Failure")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "reply": "My neural link is momentarily unstable. Please try again."
+        }), 500
 
 @app.route('/api/evidence/analyze', methods=['POST'])
 def analyze_frame():
