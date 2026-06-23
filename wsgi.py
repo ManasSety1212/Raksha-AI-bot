@@ -9,7 +9,7 @@ sys.path.append(project_root)
 try:
     from raksha_app import app
 except ImportError as e:
-    raise ImportError(f"CRITICAL: AI Bot 'raksha_app.py' not found. Error: {str(e)}")
+    raise ImportError(f"CRITICAL: AI Bot 'app.py' not found. Error: {str(e)}")
 
 if __name__ == "__main__":
     app.run()
