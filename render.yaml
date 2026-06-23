@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: raksha-ai-bot
+    runtime: python
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: chmod +x start.sh && ./start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: OPENAI_API_KEY
+        value: placeholder_change_in_render_dashboard
