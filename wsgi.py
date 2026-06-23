@@ -5,19 +5,14 @@ import os
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(project_root)
 
-# Force search in subfolders if missing in root
-backend_path = os.path.join(project_root, 'python_backend')
-if os.path.exists(backend_path):
-    sys.path.append(backend_path)
-
-# Try to import from various possible sources
+# Try to import from the uniquely named core file
 try:
-    from app import app
-except ImportError:
-    try:
-        from python_backend.app import app
-    except ImportError:
-        raise ImportError("CRITICAL: AI Bot 'app.py' not found in root or python_backend folder.")
+    from raksha_app import app
+except ImportError as e:
+    raise ImportError(f"CRITICAL: AI Bot 'raksha_app.py' not found. Error: {str(e)}")
+
+if __name__ == "__main__":
+    app.run()
 
 if __name__ == "__main__":
     app.run()
