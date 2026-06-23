@@ -40,12 +40,13 @@ if not firebase_admin._apps:
         firebase_admin.initialize_app(cred, {
             'storageBucket': 'tanprix-52683.firebasestorage.app'
         })
-        print("[Firebase] Initialized from environment")
+        print("[Firebase] SUCCESS: Initialized from environment variable")
     else:
+        print("[Firebase] ERROR: No credentials found! Please set FIREBASE_SERVICE_ACCOUNT in Render Dashboard.")
+        # Attempting default anyway, but this will likely fail with ADC error
         firebase_admin.initialize_app(options={
             'storageBucket': 'tanprix-52683.firebasestorage.app'
         })
-        print("[Firebase] Initialized with defaults")
 
 db = firestore.client()
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
