@@ -56,6 +56,15 @@ def get_db():
         print("[Firebase] CRITICAL: Firestore client access failed. Check credentials!")
         return None
 
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "system": "Raksha AI Bot",
+        "version": "1.0.0",
+        "message": "Raksha AI Backend is successfully running on Render."
+    })
+
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Initialize Bot Services
