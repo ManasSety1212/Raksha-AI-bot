@@ -207,46 +207,56 @@ def register_face():
 @app.route('/api/nearby/police', methods=['GET'])
 def get_nearby_police():
     try:
-        lat = float(request.args.get('lat'))
-        lng = float(request.args.get('lng'))
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "Invalid Latitude or Longitude format"}), 400
+        lat_raw = request.args.get('lat')
+        lng_raw = request.args.get('lng')
+        
+        if not lat_raw or not lng_raw:
+            return jsonify({"success": False, "error": "Latitude and longitude are required"}), 400
+            
+        try:
+            lat = float(lat_raw)
+            lng = float(lng_raw)
+        except ValueError:
+            return jsonify({"success": False, "error": "Invalid coordinate format"}), 400
+            
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Request error: {str(e)}"}), 400
     
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
-    results = []
+    places = []
     
     try:
         import requests
-        # TRY GOOGLE FIRST
+        # 1. TRY GOOGLE PLACES API
         if api_key and api_key != "placeholder_change_in_render_dashboard":
             try:
                 url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=5000&type=police&key={api_key}"
                 response = requests.get(url, timeout=10)
                 
-                if response.ok:
+                text = response.text
+                if not text:
+                    print("[Maps] Empty response from Google")
+                else:
                     data = response.json()
                     if data.get('status') == 'OK':
-                        for place in data.get('results', []):
-                            results.append({
-                                "name": place.get('name'),
-                                "address": place.get('vicinity'),
-                                "distance": "N/A",
-                                "rating": place.get('rating', 0),
-                                "latitude": place.get('geometry', {}).get('location', {}).get('lat'),
-                                "longitude": place.get('geometry', {}).get('location', {}).get('lng'),
-                                "openNow": place.get('opening_hours', {}).get('open_now', False),
-                                "placeId": place.get('place_id'),
-                                "source": "google"
+                        for item in data.get('results', []):
+                            places.append({
+                                "name": item.get('name'),
+                                "address": item.get('vicinity'),
+                                "latitude": item.get('geometry', {}).get('location', {}).get('lat'),
+                                "longitude": item.get('geometry', {}).get('location', {}).get('lng'),
+                                "distance": "Nearby",
+                                "rating": item.get('rating', "N/A"),
+                                "openNow": item.get('opening_hours', {}).get('open_now', True),
+                                "placeId": item.get('place_id')
                             })
-                        if results: return jsonify(results)
+                        return jsonify({"success": True, "places": places})
                     else:
-                        print(f"[Maps] Google Status: {data.get('status')} - {data.get('error_message', 'No details')}")
-                else:
-                    print(f"[Maps] Google HTTP Error: {response.status_code}")
+                        print(f"[Maps] Google API Status: {data.get('status')}")
             except Exception as ge:
-                print(f"[Maps] Google Try failed: {ge}")
+                print(f"[Maps] Google Search failed: {str(ge)}")
 
-        # FALLBACK TO OPENSTREETMAP (OVERPASS)
+        # 2. FALLBACK TO OPENSTREETMAP (OVERPASS)
         try:
             overpass_url = "https://overpass-api.de/api/interpreter"
             overpass_query = f"""
@@ -258,33 +268,32 @@ def get_nearby_police():
             );
             out center;
             """
-            response = requests.post(overpass_url, data={'data': overpass_query}, timeout=10)
-            if response.ok:
+            response = requests.post(overpass_url, data={'data': overpass_query}, timeout=15)
+            
+            text = response.text
+            if text and "elements" in text:
                 data = response.json()
                 for element in data.get('elements', []):
                     tags = element.get('tags', {})
-                    results.append({
+                    places.append({
                         "name": tags.get('name', 'Police Station'),
-                        "address": tags.get('addr:full') or tags.get('addr:street') or "Nearby Contact",
-                        "distance": "N/A",
-                        "rating": 0,
+                        "address": tags.get('addr:full') or tags.get('addr:street') or "Local Station",
                         "latitude": element.get('lat') or element.get('center', {}).get('lat'),
                         "longitude": element.get('lon') or element.get('center', {}).get('lon'),
+                        "distance": "Nearby",
+                        "rating": "N/A",
                         "openNow": True,
-                        "placeId": f"osm-{element.get('id')}",
-                        "source": "osm"
+                        "placeId": f"osm-{element.get('id')}"
                     })
-                return jsonify(results)
-            else:
-                print(f"[Maps] OSM HTTP Error: {response.status_code}")
+                return jsonify({"success": True, "places": places})
         except Exception as oe:
-            print(f"[Maps] OSM Try failed: {oe}")
+            print(f"[Maps] OSM Fallback failed: {str(oe)}")
 
-        # Final Fallback: Return empty list instead of crashing
-        return jsonify([])
+        # 3. IF ALL FAIL, RETURN SUCCESS TRUE BUT EMPTY LIST TO AVOID CRASH
+        return jsonify({"success": True, "places": []})
         
     except Exception as e:
-        app.logger.exception("Nearby Police Global Failure")
+        app.logger.exception("Global Nearby Failure")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # --- BOT ROUTES ---
