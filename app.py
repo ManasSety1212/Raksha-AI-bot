@@ -21,6 +21,25 @@ except ImportError:
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'raksha_secret_key'
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# --- BOT & GUARDIAN INITIALIZATION ---
+bot_engine = None
+bot_fb = None
+pdf_gen = None
+
+if 'RakshaBotEngine' in globals():
+    try:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            bot_engine = RakshaBotEngine(api_key=api_key)
+            bot_fb = RakshaFirebaseService()
+            pdf_gen = StudyPlanPDFGenerator()
+            print("[Bot] Components initialized successfully")
+        else:
+            print("[Bot] Warning: OPENAI_API_KEY not found, engine deferred")
+    except Exception as e:
+        print(f"[Bot] Initialization failed: {e}")
 
 # --- FIREBASE INITIALIZATION ---
 if not firebase_admin._apps:
@@ -59,20 +78,12 @@ def get_db():
 # --- GLOBAL ERROR HANDLER (Strictly JSON) ---
 @app.errorhandler(Exception)
 def handle_exception(e):
-    app.logger.exception("Global Unhandled Exception")
-    return jsonify({
-        "success": False,
-        "reply": "System is undergoing a brief update. Please try again in 30 seconds.",
-        "error": str(e)
-    }), 500
+    app.logger.exception("Unhandled error")
+    return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/")
 def home():
-    return jsonify({
-        "status": "ok",
-        "message": "Raksha AI Bot backend running",
-        "version": "1.1.0"
-    })
+    return jsonify({"status": "ok", "message": "Raksha AI Bot backend running"})
 
 @app.route("/api/ai/test")
 def test_ai_route():
@@ -153,10 +164,9 @@ def ai_chat():
     except Exception as e:
         app.logger.exception("AI Chat Logic Failure")
         return jsonify({
-            "success": False,
-            "error": str(e),
-            "reply": "My neural link is momentarily unstable. Please try again."
-        }), 500
+            "success": True, # Still return success True but with error message to avoid frontend crash if it expects JSON
+            "reply": f"Error: {str(e)}"
+        })
 
 @app.route('/api/evidence/analyze', methods=['POST'])
 def analyze_frame():
@@ -174,6 +184,80 @@ def automate_adb():
 @app.route('/api/auth/register', methods=['POST'])
 def register_face():
     return jsonify({"success": True, "message": "Registered"})
+
+# --- NEARBY POLICE STATION DETECTION ---
+
+@app.route('/api/nearby/police', methods=['GET'])
+def get_nearby_police():
+    lat = request.args.get('lat')
+    lng = request.args.get('lng')
+    
+    if not lat or not lng:
+        return jsonify({"success": False, "error": "Latitude and Longitude are required"}), 400
+
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    
+    try:
+        import requests
+        if api_key:
+            # Google Places API Nearby Search
+            url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=5000&type=police&key={api_key}"
+            response = requests.get(url)
+            data = response.json()
+            
+            if data.get('status') == 'OK':
+                results = []
+                for place in data.get('results', []):
+                    results.append({
+                        "name": place.get('name'),
+                        "address": place.get('vicinity'),
+                        "distance": "N/A",
+                        "rating": place.get('rating', 0),
+                        "latitude": place.get('geometry', {}).get('location', {}).get('lat'),
+                        "longitude": place.get('geometry', {}).get('location', {}).get('lng'),
+                        "openNow": place.get('opening_hours', {}).get('open_now', False),
+                        "placeId": place.get('place_id')
+                    })
+                return jsonify(results)
+        
+        # Fallback to OpenStreetMap Overpass API
+        overpass_url = "https://overpass-api.de/api/interpreter"
+        overpass_query = f"""
+        [out:json];
+        (
+          node(around:5000,{lat},{lng})[amenity=police];
+          way(around:5000,{lat},{lng})[amenity=police];
+          relation(around:5000,{lat},{lng})[amenity=police];
+        );
+        out center;
+        """
+        response = requests.post(overpass_url, data={'data': overpass_query})
+        data = response.json()
+        
+        results = []
+        for element in data.get('elements', []):
+            name = element.get('tags', {}).get('name', 'Police Station')
+            address = element.get('tags', {}).get('addr:full') or \
+                      element.get('tags', {}).get('addr:street', 'Address not available')
+            
+            lat_osm = element.get('lat') or element.get('center', {}).get('lat')
+            lon_osm = element.get('lon') or element.get('center', {}).get('lon')
+            
+            results.append({
+                "name": name,
+                "address": address,
+                "distance": "N/A",
+                "rating": 0,
+                "latitude": lat_osm,
+                "longitude": lon_osm,
+                "openNow": True,
+                "placeId": f"osm-{element.get('id')}"
+            })
+        return jsonify(results)
+        
+    except Exception as e:
+        app.logger.exception("Nearby Police Detection Error")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # --- BOT ROUTES ---
 @app.route('/api/raksha-bot/chat', methods=['POST'])
