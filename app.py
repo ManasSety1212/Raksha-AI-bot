@@ -3,6 +3,8 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
+from dotenv import load_dotenv
+load_dotenv() # Load variables from .env if present
 import sys
 import time
 from datetime import datetime
