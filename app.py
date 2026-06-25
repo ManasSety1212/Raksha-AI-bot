@@ -48,23 +48,38 @@ if not firebase_admin._apps:
     key_path = 'serviceAccountKey.json'
     env_key = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     
+    # Look for any .json file that looks like a service account key
+    json_keys = [f for f in os.listdir('.') if f.endswith('.json') and 'firebase-adminsdk' in f]
+    default_key = json_keys[0] if json_keys else 'serviceAccountKey.json'
+    
     if os.path.exists(key_path):
         cred = credentials.Certificate(key_path)
         firebase_admin.initialize_app(cred, {
             'storageBucket': 'tanprix-52683.firebasestorage.app'
         })
-        print("[Firebase] Initialized from file")
-    elif env_key:
-        import json
-        cred_dict = json.loads(env_key)
-        cred = credentials.Certificate(cred_dict)
+        print(f"[Firebase] Initialized from {key_path}")
+    elif os.path.exists(default_key):
+        cred = credentials.Certificate(default_key)
         firebase_admin.initialize_app(cred, {
             'storageBucket': 'tanprix-52683.firebasestorage.app'
         })
-        print("[Firebase] SUCCESS: Initialized from environment variable")
+        print(f"[Firebase] Initialized from {default_key}")
+    elif env_key:
+        try:
+            import json
+            cred_dict = json.loads(env_key)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred, {
+                'storageBucket': 'tanprix-52683.firebasestorage.app'
+            })
+            print("[Firebase] SUCCESS: Initialized from environment variable")
+        except Exception as e:
+            print(f"[Firebase] ERROR: Failed to parse FIREBASE_SERVICE_ACCOUNT JSON: {e}")
+            firebase_admin.initialize_app(options={
+                'storageBucket': 'tanprix-52683.firebasestorage.app'
+            })
     else:
-        print("[Firebase] ERROR: No credentials found! Please set FIREBASE_SERVICE_ACCOUNT in Render Dashboard.")
-        # Attempting default anyway, but this will likely fail with ADC error
+        print("[Firebase] ERROR: No credentials found!")
         firebase_admin.initialize_app(options={
             'storageBucket': 'tanprix-52683.firebasestorage.app'
         })
@@ -191,74 +206,85 @@ def register_face():
 
 @app.route('/api/nearby/police', methods=['GET'])
 def get_nearby_police():
-    lat = request.args.get('lat')
-    lng = request.args.get('lng')
+    try:
+        lat = float(request.args.get('lat'))
+        lng = float(request.args.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Invalid Latitude or Longitude format"}), 400
     
-    if not lat or not lng:
-        return jsonify({"success": False, "error": "Latitude and Longitude are required"}), 400
-
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    results = []
     
     try:
         import requests
-        if api_key:
-            # Google Places API Nearby Search
-            url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=5000&type=police&key={api_key}"
-            response = requests.get(url)
-            data = response.json()
-            
-            if data.get('status') == 'OK':
-                results = []
-                for place in data.get('results', []):
+        # TRY GOOGLE FIRST
+        if api_key and api_key != "placeholder_change_in_render_dashboard":
+            try:
+                url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=5000&type=police&key={api_key}"
+                response = requests.get(url, timeout=10)
+                
+                if response.ok:
+                    data = response.json()
+                    if data.get('status') == 'OK':
+                        for place in data.get('results', []):
+                            results.append({
+                                "name": place.get('name'),
+                                "address": place.get('vicinity'),
+                                "distance": "N/A",
+                                "rating": place.get('rating', 0),
+                                "latitude": place.get('geometry', {}).get('location', {}).get('lat'),
+                                "longitude": place.get('geometry', {}).get('location', {}).get('lng'),
+                                "openNow": place.get('opening_hours', {}).get('open_now', False),
+                                "placeId": place.get('place_id'),
+                                "source": "google"
+                            })
+                        if results: return jsonify(results)
+                    else:
+                        print(f"[Maps] Google Status: {data.get('status')} - {data.get('error_message', 'No details')}")
+                else:
+                    print(f"[Maps] Google HTTP Error: {response.status_code}")
+            except Exception as ge:
+                print(f"[Maps] Google Try failed: {ge}")
+
+        # FALLBACK TO OPENSTREETMAP (OVERPASS)
+        try:
+            overpass_url = "https://overpass-api.de/api/interpreter"
+            overpass_query = f"""
+            [out:json];
+            (
+              node(around:5000,{lat},{lng})[amenity=police];
+              way(around:5000,{lat},{lng})[amenity=police];
+              relation(around:5000,{lat},{lng})[amenity=police];
+            );
+            out center;
+            """
+            response = requests.post(overpass_url, data={'data': overpass_query}, timeout=10)
+            if response.ok:
+                data = response.json()
+                for element in data.get('elements', []):
+                    tags = element.get('tags', {})
                     results.append({
-                        "name": place.get('name'),
-                        "address": place.get('vicinity'),
+                        "name": tags.get('name', 'Police Station'),
+                        "address": tags.get('addr:full') or tags.get('addr:street') or "Nearby Contact",
                         "distance": "N/A",
-                        "rating": place.get('rating', 0),
-                        "latitude": place.get('geometry', {}).get('location', {}).get('lat'),
-                        "longitude": place.get('geometry', {}).get('location', {}).get('lng'),
-                        "openNow": place.get('opening_hours', {}).get('open_now', False),
-                        "placeId": place.get('place_id')
+                        "rating": 0,
+                        "latitude": element.get('lat') or element.get('center', {}).get('lat'),
+                        "longitude": element.get('lon') or element.get('center', {}).get('lon'),
+                        "openNow": True,
+                        "placeId": f"osm-{element.get('id')}",
+                        "source": "osm"
                     })
                 return jsonify(results)
-        
-        # Fallback to OpenStreetMap Overpass API
-        overpass_url = "https://overpass-api.de/api/interpreter"
-        overpass_query = f"""
-        [out:json];
-        (
-          node(around:5000,{lat},{lng})[amenity=police];
-          way(around:5000,{lat},{lng})[amenity=police];
-          relation(around:5000,{lat},{lng})[amenity=police];
-        );
-        out center;
-        """
-        response = requests.post(overpass_url, data={'data': overpass_query})
-        data = response.json()
-        
-        results = []
-        for element in data.get('elements', []):
-            name = element.get('tags', {}).get('name', 'Police Station')
-            address = element.get('tags', {}).get('addr:full') or \
-                      element.get('tags', {}).get('addr:street', 'Address not available')
-            
-            lat_osm = element.get('lat') or element.get('center', {}).get('lat')
-            lon_osm = element.get('lon') or element.get('center', {}).get('lon')
-            
-            results.append({
-                "name": name,
-                "address": address,
-                "distance": "N/A",
-                "rating": 0,
-                "latitude": lat_osm,
-                "longitude": lon_osm,
-                "openNow": True,
-                "placeId": f"osm-{element.get('id')}"
-            })
-        return jsonify(results)
+            else:
+                print(f"[Maps] OSM HTTP Error: {response.status_code}")
+        except Exception as oe:
+            print(f"[Maps] OSM Try failed: {oe}")
+
+        # Final Fallback: Return empty list instead of crashing
+        return jsonify([])
         
     except Exception as e:
-        app.logger.exception("Nearby Police Detection Error")
+        app.logger.exception("Nearby Police Global Failure")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # --- BOT ROUTES ---
