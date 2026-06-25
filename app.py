@@ -214,93 +214,121 @@ def register_face():
 @app.route('/api/nearby/police', methods=['GET'])
 def get_nearby_police():
     try:
-        lat_raw = request.args.get('lat')
-        lng_raw = request.args.get('lng')
-        
-        if not lat_raw or not lng_raw:
-            return jsonify({"success": False, "error": "Latitude and longitude are required"}), 400
-            
-        try:
-            lat = float(lat_raw)
-            lng = float(lng_raw)
-        except ValueError:
-            return jsonify({"success": False, "error": "Invalid coordinate format"}), 400
-            
-    except Exception as e:
-        return jsonify({"success": False, "error": f"Request error: {str(e)}"}), 400
-    
+        lat = float(request.args.get('lat'))
+        lng = float(request.args.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Invalid coordinates"}), 400
+
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     places = []
     
+    def calculate_distance(lat1, lon1, lat2, lon2):
+        R = 6371  # Earth radius in KM
+        dLat = math.radians(lat2 - lat1)
+        dLon = math.radians(lon2 - lon1)
+        a = math.sin(dLat / 2) * math.sin(dLat / 2) + \
+            math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
+            math.sin(dLon / 2) * math.sin(dLon / 2)
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
     try:
         import requests
-        # 1. TRY GOOGLE PLACES API
+        
+        # 1. GOOGLE TEXT SEARCH (Better for small cities)
         if api_key and api_key != "placeholder_change_in_render_dashboard":
             try:
-                url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=5000&type=police&key={api_key}"
-                response = requests.get(url, timeout=10)
+                # Text Search is more robust than "nearbysearch" with just types
+                text_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+                text_params = {
+                    "query": f"police station near {lat},{lng}",
+                    "location": f"{lat},{lng}",
+                    "radius": 15000,
+                    "key": api_key
+                }
+                resp = requests.get(text_url, params=text_params, timeout=10)
+                data = resp.json()
                 
-                text = response.text
-                if not text:
-                    print("[Maps] Empty response from Google")
-                else:
-                    data = response.json()
-                    if data.get('status') == 'OK':
-                        for item in data.get('results', []):
-                            places.append({
-                                "name": item.get('name'),
-                                "address": item.get('vicinity'),
-                                "latitude": item.get('geometry', {}).get('location', {}).get('lat'),
-                                "longitude": item.get('geometry', {}).get('location', {}).get('lng'),
-                                "distance": "Nearby",
-                                "rating": item.get('rating', "N/A"),
-                                "openNow": item.get('opening_hours', {}).get('open_now', True),
-                                "placeId": item.get('place_id')
-                            })
-                        return jsonify({"success": True, "places": places})
-                    else:
-                        print(f"[Maps] Google API Status: {data.get('status')}")
-            except Exception as ge:
-                print(f"[Maps] Google Search failed: {str(ge)}")
+                print(f"[Maps] TextSearch Status: {data.get('status')}")
+                
+                results = data.get('results', [])
+                # If text search yields nothing, try Nearby Search as fallback
+                if not results or data.get('status') != 'OK':
+                    print("[Maps] Falling back to Nearby Search...")
+                    nearby_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+                    nearby_params = {
+                        "location": f"{lat},{lng}",
+                        "radius": 15000,
+                        "type": "police",
+                        "keyword": "police station",
+                        "key": api_key
+                    }
+                    results = requests.get(nearby_url, params=nearby_params, timeout=10).json().get('results', [])
 
-        # 2. FALLBACK TO OPENSTREETMAP (OVERPASS)
-        try:
-            overpass_url = "https://overpass-api.de/api/interpreter"
-            overpass_query = f"""
-            [out:json];
-            (
-              node(around:5000,{lat},{lng})[amenity=police];
-              way(around:5000,{lat},{lng})[amenity=police];
-              relation(around:5000,{lat},{lng})[amenity=police];
-            );
-            out center;
-            """
-            response = requests.post(overpass_url, data={'data': overpass_query}, timeout=15)
-            
-            text = response.text
-            if text and "elements" in text:
-                data = response.json()
-                for element in data.get('elements', []):
-                    tags = element.get('tags', {})
+                for item in results:
+                    p_lat = item.get('geometry', {}).get('location', {}).get('lat')
+                    p_lng = item.get('geometry', {}).get('location', {}).get('lng')
+                    dist = calculate_distance(lat, lng, p_lat, p_lng)
+                    
+                    places.append({
+                        "name": item.get('name'),
+                        "address": item.get('formatted_address') or item.get('vicinity'),
+                        "latitude": p_lat,
+                        "longitude": p_lng,
+                        "distanceKm": round(dist, 2),
+                        "rating": item.get('rating'),
+                        "openNow": item.get('opening_hours', {}).get('open_now'),
+                        "placeId": item.get('place_id'),
+                        "mapsUrl": f"https://www.google.com/maps/search/?api=1&query=police+station&query_place_id={item.get('place_id')}"
+                    })
+            except Exception as ge:
+                print(f"[Maps] Google Search crashed: {str(ge)}")
+
+        # 2. OSM FALLBACK (If Google failed or no results)
+        if not places:
+            try:
+                print("[Maps] Using OSM Overpass fallback...")
+                overpass_url = "https://overpass-api.de/api/interpreter"
+                overpass_query = f"""
+                [out:json];
+                (node(around:15000,{lat},{lng})[amenity=police];
+                 way(around:15000,{lat},{lng})[amenity=police];
+                 relation(around:15000,{lat},{lng})[amenity=police];);
+                out center;
+                """
+                resp = requests.post(overpass_url, data={'data': overpass_query}, timeout=15)
+                data = resp.json()
+                for el in data.get('elements', []):
+                    tags = el.get('tags', {})
+                    p_lat = el.get('lat') or el.get('center', {}).get('lat')
+                    p_lng = el.get('lon') or el.get('center', {}).get('lon')
+                    dist = calculate_distance(lat, lng, p_lat, p_lng)
                     places.append({
                         "name": tags.get('name', 'Police Station'),
-                        "address": tags.get('addr:full') or tags.get('addr:street') or "Local Station",
-                        "latitude": element.get('lat') or element.get('center', {}).get('lat'),
-                        "longitude": element.get('lon') or element.get('center', {}).get('lon'),
-                        "distance": "Nearby",
-                        "rating": "N/A",
+                        "address": tags.get('addr:full') or "Local Area Station",
+                        "latitude": p_lat,
+                        "longitude": p_lng,
+                        "distanceKm": round(dist, 2),
+                        "rating": 0,
                         "openNow": True,
-                        "placeId": f"osm-{element.get('id')}"
+                        "placeId": f"osm-{el.get('id')}",
+                        "mapsUrl": f"https://www.google.com/maps/search/?api=1&query={p_lat},{p_lng}"
                     })
-                return jsonify({"success": True, "places": places})
-        except Exception as oe:
-            print(f"[Maps] OSM Fallback failed: {str(oe)}")
+            except Exception as oe:
+                print(f"[Maps] OSM failed: {str(oe)}")
 
-        # 3. IF ALL FAIL, RETURN SUCCESS TRUE BUT EMPTY LIST TO AVOID CRASH
-        return jsonify({"success": True, "places": []})
-        
+        # 3. SORT BY DISTANCE AND LIMIT TO 10
+        places.sort(key=lambda x: x['distanceKm'])
+        final_places = places[:10]
+
+        return jsonify({
+            "success": True,
+            "places": final_places,
+            "message": "Results found" if final_places else "No police stations found. Try Google Maps."
+        })
+
     except Exception as e:
-        app.logger.exception("Global Nearby Failure")
+        app.logger.exception("Nearby API Global Crash")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # --- BOT ROUTES ---
