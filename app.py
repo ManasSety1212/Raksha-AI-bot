@@ -198,6 +198,13 @@ def cloud_sms():
 def automate_adb():
     return jsonify({"success": True, "status": "Automation active"})
 
+@app.route('/api/location/update', methods=['POST'])
+def location_update():
+    # Placeholder for geofencing logic
+    data = request.get_json(silent=True) or {}
+    print(f"[Geofence] Update from {data.get('deviceId')}: {data.get('latitude')}, {data.get('longitude')}")
+    return jsonify({"success": True, "status": "Location synchronized"})
+
 @app.route('/api/auth/register', methods=['POST'])
 def register_face():
     return jsonify({"success": True, "message": "Registered"})
