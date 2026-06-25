@@ -247,6 +247,7 @@ def get_nearby_police():
 
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     places = []
+    debug = {"queries": []}
     
     def calculate_distance(lat1, lon1, lat2, lon2):
         R = 6371  # Earth radius in KM
@@ -258,107 +259,82 @@ def get_nearby_police():
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return R * c
 
+    if not api_key or api_key == "placeholder_change_in_render_dashboard":
+        return jsonify({"success": False, "error": "Google Maps API Key is missing on server"}), 500
+
     try:
         import requests
         
-        # 1. GOOGLE TEXT SEARCH (Better for small cities)
-        if api_key and api_key != "placeholder_change_in_render_dashboard":
-            try:
-                # Text Search is more robust than "nearbysearch" with just types
-                text_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-                text_params = {
-                    "query": f"police station near {lat},{lng}",
-                    "location": f"{lat},{lng}",
-                    "radius": 15000,
-                    "key": api_key
-                }
-                resp = requests.get(text_url, params=text_params, timeout=10)
-                data = resp.json()
-                
-                print(f"[Maps] TextSearch Status: {data.get('status')}")
-                
-                results = data.get('results', [])
-                # If text search yields nothing, try Nearby Search as fallback
-                if not results or data.get('status') != 'OK':
-                    print("[Maps] Falling back to Nearby Search...")
-                    nearby_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-                    nearby_params = {
-                        "location": f"{lat},{lng}",
-                        "radius": 15000,
-                        "type": "police",
-                        "keyword": "police station",
-                        "key": api_key
-                    }
-                    results = requests.get(nearby_url, params=nearby_params, timeout=10).json().get('results', [])
+        # SEARCH STRATEGY: Try multiple queries to catch regional terms (Thana, Chowki)
+        queries = [
+            f"police station near {lat},{lng}",
+            f"thana near {lat},{lng}",
+            f"police chowki near {lat},{lng}"
+        ]
+        
+        seen_place_ids = set()
+        
+        for q in queries:
+            if len(places) >= 10: break
+            
+            text_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+            params = {
+                "query": q,
+                "location": f"{lat},{lng}",
+                "radius": 30000,
+                "key": api_key
+            }
+            resp = requests.get(text_url, params=params, timeout=10)
+            data = resp.json()
+            
+            debug["queries"].append({
+                "query": q,
+                "status": data.get('status'),
+                "count": len(data.get('results', [])),
+                "error": data.get('error_message')
+            })
 
-                for item in results:
-                    p_lat = item.get('geometry', {}).get('location', {}).get('lat')
-                    p_lng = item.get('geometry', {}).get('location', {}).get('lng')
-                    dist = calculate_distance(lat, lng, p_lat, p_lng)
-                    
-                    places.append({
-                        "name": item.get('name'),
-                        "address": item.get('formatted_address') or item.get('vicinity'),
-                        "latitude": p_lat,
-                        "longitude": p_lng,
-                        "distanceKm": round(dist, 2),
-                        "rating": item.get('rating'),
-                        "openNow": item.get('opening_hours', {}).get('open_now'),
-                        "placeId": item.get('place_id'),
-                        "mapsUrl": f"https://www.google.com/maps/search/?api=1&query=police+station&query_place_id={item.get('place_id')}"
-                    })
-            except Exception as ge:
-                print(f"[Maps] Google Search crashed: {str(ge)}")
+            if data.get('status') == 'OK':
+                for item in data.get('results', []):
+                    place_id = item.get('place_id')
+                    if place_id not in seen_place_ids:
+                        seen_place_ids.add(place_id)
+                        p_lat = item.get('geometry', {}).get('location', {}).get('lat')
+                        p_lng = item.get('geometry', {}).get('location', {}).get('lng')
+                        dist = calculate_distance(lat, lng, p_lat, p_lng)
+                        
+                        places.append({
+                            "name": item.get('name'),
+                            "address": item.get('formatted_address') or item.get('vicinity'),
+                            "latitude": p_lat,
+                            "longitude": p_lng,
+                            "distanceKm": round(dist, 2),
+                            "rating": item.get('rating'),
+                            "openNow": item.get('opening_hours', {}).get('open_now'),
+                            "placeId": place_id,
+                            "mapsUrl": f"https://www.google.com/maps/search/?api=1&query={p_lat},{p_lng}&query_place_id={place_id}"
+                        })
+            
+            # Stop if we found enough from the first query to keep it fast
+            if len(places) > 5: break
 
-        # 2. OSM FALLBACK (If Google failed or no results)
-        if not places:
-            try:
-                print("[Maps] Using OSM Overpass fallback...")
-                overpass_url = "https://overpass-api.de/api/interpreter"
-                overpass_query = f"""
-                [out:json];
-                (node(around:15000,{lat},{lng})[amenity=police];
-                 way(around:15000,{lat},{lng})[amenity=police];
-                 relation(around:15000,{lat},{lng})[amenity=police];);
-                out center;
-                """
-                resp = requests.post(overpass_url, data={'data': overpass_query}, timeout=15)
-                data = resp.json()
-                for el in data.get('elements', []):
-                    tags = el.get('tags', {})
-                    p_lat = el.get('lat') or el.get('center', {}).get('lat')
-                    p_lng = el.get('lon') or el.get('center', {}).get('lon')
-                    dist = calculate_distance(lat, lng, p_lat, p_lng)
-                    places.append({
-                        "name": tags.get('name', 'Police Station'),
-                        "address": tags.get('addr:full') or "Local Area Station",
-                        "latitude": p_lat,
-                        "longitude": p_lng,
-                        "distanceKm": round(dist, 2),
-                        "rating": 0,
-                        "openNow": True,
-                        "placeId": f"osm-{el.get('id')}",
-                        "mapsUrl": f"https://www.google.com/maps/search/?api=1&query={p_lat},{p_lng}"
-                    })
-            except Exception as oe:
-                print(f"[Maps] OSM failed: {str(oe)}")
-
-        # 3. SORT BY DISTANCE AND LIMIT TO 10
+        # SORT BY DISTANCE
         places.sort(key=lambda x: x['distanceKm'])
         final_places = places[:10]
 
         return jsonify({
             "success": True,
             "places": final_places,
-            "message": "Results found" if final_places else "No police stations found. Try Google Maps."
+            "count": len(final_places),
+            "debug": debug,
+            "message": "Results found" if final_places else "No police stations found. Try searching in Google Maps app."
         })
 
     except Exception as e:
-        app.logger.exception("Nearby API Global Crash")
+        app.logger.exception("Nearby API Broad Search Failure")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # --- BOT ROUTES ---
-@app.route('/api/raksha-bot/chat', methods=['POST'])
 @app.route('/api/ai/chat', methods=['POST'])
 def bot_chat():
     data = request.get_json(silent=True) or {}
