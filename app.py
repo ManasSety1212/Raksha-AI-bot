@@ -194,9 +194,35 @@ def cloud_sms():
     print(f"[Cloud SMS] Sending to {request.json.get('numbers')}")
     return jsonify({"success": True, "status": "Queued via Render Backend"})
 
-@app.route('/api/sos/automate', methods=['POST'])
-def automate_adb():
-    return jsonify({"success": True, "status": "Automation active"})
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "message": "Raksha AI Bot backend running",
+        "status": "ok",
+        "version": "1.0.2"
+    })
+
+@app.route("/api/debug/env", methods=["GET"])
+def debug_env():
+    return jsonify({
+        "status": "ok",
+        "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
+        "google_key_present": bool(os.getenv("GOOGLE_MAPS_API_KEY")),
+        "firebase_key_present": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT"))
+    })
+
+@app.route("/api/routes", methods=["GET"])
+def list_routes():
+    import urllib.parse
+    output = []
+    for rule in app.url_map.iter_rules():
+        methods = ','.join(rule.methods)
+        url = urllib.parse.unquote(str(rule))
+        output.append({"route": url, "methods": methods})
+    return jsonify({
+        "success": True,
+        "routes": output
+    })
 
 @app.route('/api/location/update', methods=['POST'])
 def location_update():
@@ -333,10 +359,18 @@ def get_nearby_police():
 
 # --- BOT ROUTES ---
 @app.route('/api/raksha-bot/chat', methods=['POST'])
+@app.route('/api/ai/chat', methods=['POST'])
 def bot_chat():
-    reply = bot_engine.get_chat_response(request.json.get('message'), request.json.get('section', 'safety'))
-    if request.json.get('userId'):
-        bot_fb.save_chat_message(request.json.get('userId'), {"sender": "bot", "message": reply, "section": request.json.get('section')})
+    data = request.get_json(silent=True) or {}
+    msg = data.get('message')
+    section = data.get('section', 'safety')
+    
+    if not msg:
+        return jsonify({"reply": "I didn't receive any message."}), 400
+        
+    reply = bot_engine.get_chat_response(msg, section)
+    if data.get('userId'):
+        bot_fb.save_chat_message(data.get('userId'), {"sender": "bot", "message": reply, "section": section})
     return jsonify({"reply": reply})
 
 @app.route('/api/raksha-bot/live-exams', methods=['GET'])
